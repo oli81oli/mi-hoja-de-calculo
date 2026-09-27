@@ -68,9 +68,11 @@ function usePeriodo() {
 
 function App() {
   const periodo = usePeriodo();
-  const [cells, setCells] = useState({});
-  const [marcados, setMarcados] = useState({});
   const [estado, setEstado] = useState('guardado');
+  const [cells, setCells] = useState({});
+
+  const celdaVacia = { valor: '', marcado: false };
+  const celdas = useRef(cells);
   const temporizador = useRef(null);
   const temporizadores = useRef(new Map());
   const sinConfirmar = useRef(new Map());
@@ -78,18 +80,28 @@ function App() {
   const clave = `${periodo.anio}-${periodo.mes + 1}`;
   const semanas = useMemo(() => obtenerSemanas(periodo), [periodo]);
 
-  // 1. Enviar una celda al servidor (SQLite)
-  const enviar = async (id, value) => {
+  const leer = (id) => cells[id] || celdaVacia;
+
+  // Espejo de las celdas para usarlo dentro de manejadores de eventos
+  useEffect(() => {
+    celdas.current = cells;
+  }, [cells]);
+
+  // 1. Enviar valor + formato de una celda al servidor (SQLite)
+  const enviar = async (id, celda) => {
     setEstado('guardando');
     try {
       const res = await fetch(`${API_URL}/api/cells`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, value }),
+        body: JSON.stringify({ id, value: celda.valor, marked: celda.marcado }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-      if (sinConfirmar.current.get(id) === value) sinConfirmar.current.delete(id);
+      const actual = sinConfirmar.current.get(id);
+      if (actual && actual.valor === celda.valor && actual.marcado === celda.marcado) {
+        sinConfirmar.current.delete(id);
+      }
       setEstado(sinConfirmar.current.size > 0 ? 'guardando' : 'guardado');
     } catch (err) {
       console.error('Error al guardar celda:', err);
@@ -97,42 +109,50 @@ function App() {
     }
   };
 
-  // 2. Guardar al dejar de escribir: una peticion POST por celda modificada
-  const handleChange = (id, value) => {
-    setCells((prev) => ({ ...prev, [id]: value }));
-    sinConfirmar.current.set(id, value);
-    setEstado('guardando');
-
+  const programarEnvio = (id, inmediato) => {
     clearTimeout(temporizadores.current.get(id));
-    temporizadores.current.set(
-      id,
-      setTimeout(() => {
-        temporizadores.current.delete(id);
-        enviar(id, value);
-      }, ESPERA_GUARDADO)
-    );
+    const lanzar = () => {
+      temporizadores.current.delete(id);
+      const celda = sinConfirmar.current.get(id);
+      if (celda) enviar(id, celda);
+    };
+    temporizadores.current.set(id, inmediato ? lanzar() : setTimeout(lanzar, ESPERA_GUARDADO));
   };
+
+  // 2. Unico punto de escritura: actualiza la celda y la guarda
+  const guardar = (id, cambios, inmediato = false) => {
+    const nuevo = { ...(celdas.current[id] || celdaVacia), ...cambios };
+    setCells((prev) => (prev[id] === nuevo ? prev : { ...prev, [id]: nuevo }));
+    sinConfirmar.current.set(id, nuevo);
+    setEstado('guardando');
+    programarEnvio(id, inmediato);
+  };
+
+  const handleChange = (id, valor) => guardar(id, { valor }, false);
 
   // Al salir de la celda, se envia sin esperar
   const guardarYa = (id) => {
-    if (!sinConfirmar.current.has(id)) return;
+    const celda = sinConfirmar.current.get(id);
+    if (!celda) return;
     clearTimeout(temporizadores.current.get(id));
     temporizadores.current.delete(id);
-    enviar(id, sinConfirmar.current.get(id));
+    enviar(id, celda);
   };
 
   const reintentar = () => {
-    new Map(sinConfirmar.current).forEach((value, id) => enviar(id, value));
+    new Map(sinConfirmar.current).forEach((celda, id) => enviar(id, celda));
   };
 
   // 3. Al cerrar la pagina, mandar lo que quedase pendiente
   useEffect(() => {
     const alSalir = () => {
       if (!navigator.sendBeacon) return;
-      sinConfirmar.current.forEach((value, id) =>
+      sinConfirmar.current.forEach((celda, id) =>
         navigator.sendBeacon(
           `${API_URL}/api/cells`,
-          new Blob([JSON.stringify({ id, value })], { type: 'application/json' })
+          new Blob([JSON.stringify({ id, value: celda.valor, marked: celda.marcado })], {
+            type: 'application/json',
+          })
         )
       );
     };
@@ -154,7 +174,7 @@ function App() {
         if (cancelado) return;
         const loaded = {};
         data.cells.forEach((cell) => {
-          loaded[cell.id] = cell.value;
+          loaded[cell.id] = { valor: cell.value ?? '', marcado: Boolean(cell.marked) };
         });
         setCells(loaded);
         setEstado('guardado');
@@ -170,7 +190,7 @@ function App() {
     };
   }, []);
 
-  // Pulsacion mantenida: marca la celda para poder deshacerla
+  // Pulsacion mantenida: marca la celda (pintada de amarillo) para poder deshacerla
   const pararTemporizador = () => {
     if (temporizador.current) {
       clearTimeout(temporizador.current);
@@ -182,32 +202,22 @@ function App() {
 
   const mantenerPulsado = (id) => {
     pararTemporizador();
-    if (marcados[id]) return;
+    if (leer(id).marcado) return;
     temporizador.current = setTimeout(() => {
       temporizador.current = null;
-      setMarcados((prev) => ({ ...prev, [id]: true }));
+      guardar(id, { marcado: true }, true);
       if (navigator.vibrate) navigator.vibrate(20);
     }, 400);
   };
 
-  const desmarcar = (id) => {
-    pararTemporizador();
-    setMarcados((prev) => {
-      if (!prev[id]) return prev;
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-  };
-
   const borrarCelda = (id) => {
-    desmarcar(id);
-    if (cells[id]) handleChange(id, '');
+    pararTemporizador();
+    guardar(id, { valor: '', marcado: false }, true);
   };
 
   const sumaPersona = (persona, semana, i) =>
     semana.reduce(
-      (acc, d) => (d.delMes ? acc + aNumero(cells[`${clave}-${persona}-${d.dia}-${i + 1}`]) : acc),
+      (acc, d) => (d.delMes ? acc + aNumero(leer(`${clave}-${persona}-${d.dia}-${i + 1}`).valor) : acc),
       0
     );
 
@@ -279,8 +289,8 @@ function App() {
                   <th className="nombre">{persona}</th>
                   {semana.map((d) => {
                     const id = `${clave}-${persona}-${d.dia}-${i + 1}`;
-                    const marcado = Boolean(marcados[id]);
-
+                    const celda = leer(id);
+                    const marcado = celda.marcado;
                     return (
                       <td
                         key={d.letra}
@@ -291,7 +301,7 @@ function App() {
                         <input
                           type="text"
                           inputMode="decimal"
-                          value={cells[id] ?? ''}
+                          value={celda.valor}
                           onChange={(e) => handleChange(id, soloNumeros(e.target.value))}
                           onBlur={() => guardarYa(id)}
                           onPointerDown={() => mantenerPulsado(id)}
