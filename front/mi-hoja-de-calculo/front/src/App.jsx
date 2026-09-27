@@ -74,7 +74,8 @@ function App() {
   const semanas = useMemo(() => obtenerSemanas(periodo), [periodo]);
 
   useEffect(() => {
-    fetch('http://localhost:3001/api/cells')
+    const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+    fetch(`${API_URL}/api/cells`)
       .then((res) => res.json())
       .then((data) => {
         const loaded = {};
