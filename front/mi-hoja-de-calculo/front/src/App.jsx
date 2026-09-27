@@ -4,6 +4,8 @@ import './App.css';
 const PERSONAS = ['Daniel', 'Oliver', 'Carlos'];
 const LETRAS = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
 const OBJETIVO = 120;
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const ESPERA_GUARDADO = 300; // ms de espera antes de enviar cada celda
 const NOMBRES_MES = [
   'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
   'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
@@ -68,35 +70,105 @@ function App() {
   const periodo = usePeriodo();
   const [cells, setCells] = useState({});
   const [marcados, setMarcados] = useState({});
+  const [estado, setEstado] = useState('guardado');
   const temporizador = useRef(null);
+  const temporizadores = useRef(new Map());
+  const sinConfirmar = useRef(new Map());
 
   const clave = `${periodo.anio}-${periodo.mes + 1}`;
   const semanas = useMemo(() => obtenerSemanas(periodo), [periodo]);
 
+  // 1. Enviar una celda al servidor (SQLite)
+  const enviar = async (id, value) => {
+    setEstado('guardando');
+    try {
+      const res = await fetch(`${API_URL}/api/cells`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, value }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      if (sinConfirmar.current.get(id) === value) sinConfirmar.current.delete(id);
+      setEstado(sinConfirmar.current.size > 0 ? 'guardando' : 'guardado');
+    } catch (err) {
+      console.error('Error al guardar celda:', err);
+      setEstado('error');
+    }
+  };
+
+  // 2. Guardar al dejar de escribir: una peticion POST por celda modificada
+  const handleChange = (id, value) => {
+    setCells((prev) => ({ ...prev, [id]: value }));
+    sinConfirmar.current.set(id, value);
+    setEstado('guardando');
+
+    clearTimeout(temporizadores.current.get(id));
+    temporizadores.current.set(
+      id,
+      setTimeout(() => {
+        temporizadores.current.delete(id);
+        enviar(id, value);
+      }, ESPERA_GUARDADO)
+    );
+  };
+
+  // Al salir de la celda, se envia sin esperar
+  const guardarYa = (id) => {
+    if (!sinConfirmar.current.has(id)) return;
+    clearTimeout(temporizadores.current.get(id));
+    temporizadores.current.delete(id);
+    enviar(id, sinConfirmar.current.get(id));
+  };
+
+  const reintentar = () => {
+    new Map(sinConfirmar.current).forEach((value, id) => enviar(id, value));
+  };
+
+  // 3. Al cerrar la pagina, mandar lo que quedase pendiente
   useEffect(() => {
-    const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+    const alSalir = () => {
+      if (!navigator.sendBeacon) return;
+      sinConfirmar.current.forEach((value, id) =>
+        navigator.sendBeacon(
+          `${API_URL}/api/cells`,
+          new Blob([JSON.stringify({ id, value })], { type: 'application/json' })
+        )
+      );
+    };
+
+    window.addEventListener('pagehide', alSalir);
+    return () => window.removeEventListener('pagehide', alSalir);
+  }, []);
+
+  // 4. Cargar lo guardado en el servidor: todos ven lo mismo al recargar
+  useEffect(() => {
+    let cancelado = false;
+
     fetch(`${API_URL}/api/cells`)
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
+        if (cancelado) return;
         const loaded = {};
         data.cells.forEach((cell) => {
           loaded[cell.id] = cell.value;
         });
         setCells(loaded);
+        setEstado('guardado');
       })
-      .catch((err) => console.error('Error al cargar celdas:', err));
-  }, []);
+      .catch((err) => {
+        if (cancelado) return;
+        console.error('Error al cargar celdas:', err);
+        setEstado('error');
+      });
 
-  // Cada mes tiene su propio prefijo de celdas, asi que al cambiar de mes
-  // la hoja aparece reseteada: sin numeros, sin sumas y sin marcas
-  const handleChange = (id, value) => {
-    setCells((prev) => ({ ...prev, [id]: value }));
-    fetch('http://localhost:3001/api/cells', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, value }),
-    }).catch((err) => console.error('Error al guardar celda:', err));
-  };
+    return () => {
+      cancelado = true;
+    };
+  }, []);
 
   // Pulsacion mantenida: marca la celda para poder deshacerla
   const pararTemporizador = () => {
@@ -148,6 +220,19 @@ function App() {
 
   return (
     <div className="hoja">
+      <div className={`estado ${estado}`}>
+        {estado === 'guardando' && 'Guardando cambios...'}
+        {estado === 'guardado' && 'Todos los cambios estan guardados en el servidor'}
+        {estado === 'error' && (
+          <>
+            No se pudo guardar en el servidor.{' '}
+            <button type="button" onClick={reintentar}>
+              Reintentar
+            </button>
+          </>
+        )}
+      </div>
+
       {semanas.map((semana, i) => (
         <table className="semana" key={`${clave}-${i}`}>
           <colgroup>
@@ -208,6 +293,7 @@ function App() {
                           inputMode="decimal"
                           value={cells[id] ?? ''}
                           onChange={(e) => handleChange(id, soloNumeros(e.target.value))}
+                          onBlur={() => guardarYa(id)}
                           onPointerDown={() => mantenerPulsado(id)}
                           onPointerUp={pararTemporizador}
                           onPointerLeave={pararTemporizador}

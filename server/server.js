@@ -38,16 +38,23 @@ app.get('/api/cells', (req, res) => {
 // 2. Ruta para guardar o actualizar una celda
 app.post('/api/cells', (req, res) => {
   const { id, value } = req.body;
-  
+
+  if (typeof id !== 'string' || id.length === 0) {
+    res.status(400).json({ error: 'El id de la celda es obligatorio' });
+    return;
+  }
+
+  const valor = typeof value === 'string' ? value : '';
+
   const query = `INSERT INTO cells (id, value) VALUES (?, ?) 
                  ON CONFLICT(id) DO UPDATE SET value = ?`;
-  
-  db.run(query, [id, value, value], function(err) {
+
+  db.run(query, [id, valor, valor], function(err) {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
     }
-    res.json({ message: 'Celda actualizada con éxito', id, value });
+    res.json({ message: 'Celda actualizada con éxito', id, value: valor });
   });
 });
 
