@@ -1,0 +1,34 @@
+# --- DEPENDENCIAS ---
+node_modules/
+**/node_modules/
+
+# --- BASES DE DATOS LOCALES ---
+*.sqlite
+*.sqlite3
+*.db
+database.sqlite
+**/database.sqlite
+**/server/database.sqlite
+
+# --- ARCHIVOS DE ENTORNO ---
+.env
+*.env
+.env.local
+.env.development.local
+.env.production.local
+front/.env
+server/.env
+
+# --- ARCHIVOS DE COMPILACIÓN Y BUILD ---
+front/dist/
+front/build/
+dist/
+build/
+
+# --- LOGS Y ARCHIVOS DEL SISTEMA ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
